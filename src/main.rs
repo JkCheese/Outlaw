@@ -3,6 +3,7 @@
 mod attacks;
 mod bitboard;
 mod position;
+mod movegen;
 mod moves;
 mod types;
 

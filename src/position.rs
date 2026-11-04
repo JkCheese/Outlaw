@@ -1,7 +1,8 @@
 use std::fmt;
+use crate::attacks::*;
 use crate::bitboard::Bitboard;
-use crate::types::*;
 use crate::moves::Move;
+use crate::types::*;
 
 pub const CASTLE_WK: u8 = 0b0001;
 pub const CASTLE_WQ: u8 = 0b0010;
@@ -19,7 +20,9 @@ pub struct Position {
     pub ep_sq: Option<Square>,
     pub half_move_clock: u8,
     pub full_move_count: u32,
-    pub castling_rights: u8
+    
+    pub castling_rights: u8,
+    pub castling_rook_sqs: [Square; 4]
 }
 
 impl Position {
@@ -33,7 +36,8 @@ impl Position {
             ep_sq: None,
             half_move_clock: 0,
             full_move_count: 1,
-            castling_rights: 0
+            castling_rights: 0,
+            castling_rook_sqs: [Square(0); 4]
         }
     }
 
@@ -107,15 +111,43 @@ impl Position {
         };
 
         // 3. Castling rights
-        let castling = fields.next().ok_or("missing castling field")?;
-        for c in castling.chars() {
-            match c {
-                'K' => pos.castling_rights |= CASTLE_WK,
-                'Q' => pos.castling_rights |= CASTLE_WQ,
-                'k' => pos.castling_rights |= CASTLE_BK,
-                'q' => pos.castling_rights |= CASTLE_BQ,
-                '-' => {}
-                _ => return Err(format!("bad castling char '{}'", c)),
+        let castling: &str = fields.next().ok_or("missing castling field")?;
+        if castling != "-" {
+            for c in castling.chars() {
+                let color = if c.is_ascii_uppercase() { Color::White } else { Color::Black };
+                let rank: u8 = if color == Color::White { 0 } else { 7 };
+                let king_bb = pos.pieces[color][Piece::King];
+                if king_bb.is_empty() {
+                    return Err("castling right without a king".to_string());
+                }
+                let king_sq = king_bb.lsb();
+                if king_sq.rank() != rank {
+                    return Err("castling king not on back rank".to_string());
+                }
+                let rook_at = |f: u8| pos.mailbox[Square::new(f, rank)] == Some((color, Piece::Rook));
+
+                let lower = c.to_ascii_lowercase();
+                let kingside = match lower {
+                    'k' => true,
+                    'q' => false,
+                    'a'..='h' => (lower as u8 - b'a') > king_sq.file(),
+                    _ => return Err(format!("bad castling char '{}'", c)),
+                };
+                let rook_file = match lower {
+                    'k' => (king_sq.file() + 1..8).rev().find(|&f| rook_at(f)),   // outermost on the right
+                    'q' => (0..king_sq.file()).find(|&f| rook_at(f)),             // outermost on the left
+                    _ => Some(lower as u8 - b'a').filter(|&f| rook_at(f)),
+                }
+                .ok_or(format!("no rook for castling char '{}'", c))?;
+
+                let bit = match (color, kingside) {
+                    (Color::White, true) => CASTLE_WK,
+                    (Color::White, false) => CASTLE_WQ,
+                    (Color::Black, true) => CASTLE_BK,
+                    (Color::Black, false) => CASTLE_BQ,
+                };
+                pos.castling_rights |= bit;
+                pos.castling_rook_sqs[bit.trailing_zeros() as usize] = Square::new(rook_file, rank);
             }
         }
 
@@ -141,10 +173,86 @@ impl Position {
         pos.full_move_count = fields.next().unwrap_or("1").parse().map_err(|_| "bad fullmove number")?;
 
         Ok(pos)
-    } // fn from_fen()
+    }
 
     pub fn is_capture(&self, m: Move) -> bool {
-        m.kind() == Move::EN_PASSANT || self.mailbox[m.to_sq()].is_some()
+        match m.kind() {
+            Move::EN_PASSANT => true,
+            Move::CASTLING => false,
+            _ => self.mailbox[m.to_sq()].is_some(),
+        }
+    }
+
+    pub fn is_square_attacked(&self, sq: Square, by: Color) -> bool {
+        self.is_square_attacked_occ(sq, by, self.occupied)
+    }
+
+    pub fn is_square_attacked_occ(&self, sq: Square, by: Color, occ: Bitboard) -> bool {
+        let theirs = &self.pieces[by];
+        !(pawn_attacks(sq, by.flip()) & theirs[Piece::Pawn]).is_empty()
+            || !(knight_attacks(sq) & theirs[Piece::Knight]).is_empty()
+            || !(king_attacks(sq) & theirs[Piece::King]).is_empty()
+            || !(bishop_attacks_slow(sq, occ) & (theirs[Piece::Bishop] | theirs[Piece::Queen])).is_empty()
+            || !(rook_attacks_slow(sq, occ) & (theirs[Piece::Rook] | theirs[Piece::Queen])).is_empty()
+    }
+
+    pub fn make_move(&self, m: Move) -> Position {
+        let mut pos = *self;
+        let us = self.color_to_move;
+        let from = m.from_sq();
+        let to = m.to_sq();
+        let (_, piece) = self.mailbox[from].expect("no piece on from square");
+        let was_capture = self.is_capture(m);
+
+        match m.kind() {
+            Move::CASTLING => {
+                let rook_from = to;
+                let rank = from.rank();
+                let (king_file, rook_file) = if rook_from.file() > from.file() { (6, 5) } else { (2, 3) };
+                pos.remove_piece(from);
+                pos.remove_piece(rook_from);
+                pos.place_piece(us, Piece::King, Square::new(king_file, rank));
+                pos.place_piece(us, Piece::Rook, Square::new(rook_file, rank));
+            }
+            Move::PROMOTION => {
+                pos.remove_piece(to);
+                pos.remove_piece(from);
+                pos.place_piece(us, m.promotion_piece().unwrap(), to);
+            }
+            Move::EN_PASSANT => {
+                pos.remove_piece(from);
+                pos.remove_piece(Square::new(to.file(), from.rank())); // the captured pawn
+                pos.place_piece(us, Piece::Pawn, to);
+            }
+            _ => {
+                pos.remove_piece(to);
+                pos.remove_piece(from);
+                pos.place_piece(us, piece, to);
+            }
+        }
+
+        pos.ep_sq = if piece == Piece::Pawn && (to.0 as i8 - from.0 as i8).abs() == 16 {
+            Some(Square((from.0 + to.0) / 2))
+        } else {
+            None
+        };
+
+        // castling rights: a king move drops both of that side's rights,
+        // and touching a rook's home square drops that rook's right
+        if piece == Piece::King {
+            pos.castling_rights &= !(if us == Color::White { CASTLE_WK | CASTLE_WQ } else { CASTLE_BK | CASTLE_BQ });
+        }
+        for i in 0..4 {
+            let bit = 1u8 << i;
+            if pos.castling_rights & bit != 0 && (from == pos.castling_rook_sqs[i] || to == pos.castling_rook_sqs[i]) {
+                pos.castling_rights &= !bit;
+            }
+        }
+
+        pos.half_move_clock = if piece == Piece::Pawn || was_capture { 0 } else { pos.half_move_clock + 1 };
+        if us == Color::Black { pos.full_move_count += 1; }
+        pos.color_to_move = us.flip();
+        pos
     }
 } // impl Position
 

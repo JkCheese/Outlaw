@@ -6,6 +6,8 @@ use crate::types::{Piece, Square};
 pub struct Move(u16);
 
 impl Move {
+    pub const NULL: Move = Move(0);
+
     pub const NORMAL: u16 = 0;
     pub const PROMOTION: u16 = 1;
     pub const EN_PASSANT: u16 = 2;
@@ -63,6 +65,22 @@ impl fmt::Display for Move {
         }
         Ok(())
     }
+}
+
+pub struct MoveList {
+    pub moves: [Move; 256],
+    pub len: usize
+}
+
+impl MoveList {
+    pub fn new() -> Self { MoveList { moves: [Move::NULL; 256], len: 0 } }
+    pub fn push(&mut self, m: Move) {
+        debug_assert!(self.len < 256);
+        self.moves[self.len] = m;
+        self.len += 1;
+    }
+    pub fn as_slice(&self) -> &[Move] { &self.moves[..self.len] }
+    pub fn is_empty(&self) -> bool { self.len == 0 }
 }
 
 #[cfg(test)]

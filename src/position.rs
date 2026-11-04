@@ -366,7 +366,7 @@ mod tests {
     #[test]
     fn test_bad_castling_char() {
         // 'X' is an invalid castling character
-        let res = Position::from_fen("8/8/8/8/8/8/8/8 w KX - 0 1");
+        let res = Position::from_fen("4k3/8/8/8/8/8/8/4K2R w KX - 0 1");
         assert!(res.unwrap_err().contains("bad castling char 'X'"));
     }
 

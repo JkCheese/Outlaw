@@ -1,10 +1,10 @@
 use crate::attacks::*;
 use crate::bitboard::Bitboard;
 use crate::position::*;
-use crate::moves::Move;
+use crate::moves::{Move, MoveList};
 use crate::types::*;
 
-pub fn generate_moves(pos: &Position, moves: &mut Vec<Move>) {
+pub fn generate_moves(pos: &Position, moves: &mut MoveList) {
     let me = pos.color_to_move;
     let own = pos.occupied_by[me];
     let occ = pos.occupied;
@@ -29,7 +29,7 @@ pub fn generate_moves(pos: &Position, moves: &mut Vec<Move>) {
     generate_castling(pos, moves);
 }
 
-fn push_pawn_move(moves: &mut Vec<Move>, from: Square, to: Square, promo_rank: u8) {
+fn push_pawn_move(moves: &mut MoveList, from: Square, to: Square, promo_rank: u8) {
     if to.rank() == promo_rank {
         for piece in [Piece::Queen, Piece::Rook, Piece::Bishop, Piece::Knight] {
             moves.push(Move::promotion(from, to, piece));
@@ -39,7 +39,7 @@ fn push_pawn_move(moves: &mut Vec<Move>, from: Square, to: Square, promo_rank: u
     }
 }
 
-pub fn generate_pawn_moves(pos: &Position, moves: &mut Vec<Move>) {
+pub fn generate_pawn_moves(pos: &Position, moves: &mut MoveList) {
     let us = pos.color_to_move;
     let them = us.flip();
     let (dir, start_rank, promo_rank): (i8, u8, u8) =
@@ -80,7 +80,7 @@ fn span(a: Square, b: Square) -> Bitboard {
     Bitboard((2u64 << hi).wrapping_sub(1u64 << lo))
 }
 
-fn generate_castling(pos: &Position, moves: &mut Vec<Move>) {
+fn generate_castling(pos: &Position, moves: &mut MoveList) {
     let us = pos.color_to_move;
     let them = us.flip();
     let king_bb = pos.pieces[us][Piece::King];
@@ -114,4 +114,41 @@ fn generate_castling(pos: &Position, moves: &mut Vec<Move>) {
 
         moves.push(Move::special(king_from, rook_from, Move::CASTLING));
     }
+}
+
+fn castles(fen: &str) -> MoveList {
+    let pos = Position::from_fen(fen).unwrap();
+    let mut moves = MoveList::new();
+    generate_castling(&pos, &mut moves);
+    moves
+}
+
+#[test]
+fn king_already_on_target() {
+    let fen = "4k3/8/8/8/8/8/8/6KR w K - 0 1";
+    let moves = castles(fen);
+    assert_eq!(moves.len, 1);
+    let after = Position::from_fen(fen).unwrap().make_move(moves.moves[0]);
+    assert_eq!(after.mailbox[Square::new(6, 0)], Some((Color::White, Piece::King)));
+    assert_eq!(after.mailbox[Square::new(5, 0)], Some((Color::White, Piece::Rook)));
+}
+
+#[test]
+fn rook_destination_must_be_empty() {
+    assert!(castles("4k3/8/8/8/8/8/8/5NKR w K - 0 1").is_empty());
+}
+
+#[test]
+fn castling_rook_shield_is_removed() {
+    assert!(castles("4k3/8/8/8/8/8/8/rR4K1 w B - 0 1").is_empty());
+}
+
+#[test]
+fn rook_next_to_king() {
+    assert_eq!(castles("4k3/8/8/8/8/8/8/2KR4 w D - 0 1").len, 1);
+}
+
+#[test]
+fn standard_both_sides() {
+    assert_eq!(castles("r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1").len, 2);
 }

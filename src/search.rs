@@ -173,6 +173,10 @@ fn score_string(score: i32) -> String {
 }
 
 pub fn search(pos: &Position, limits: &Limits, stop: Arc<AtomicBool>) -> Option<Move> {
+    search_nodes(pos, limits, stop).0
+}
+
+pub fn search_nodes(pos: &Position, limits: &Limits, stop: Arc<AtomicBool>) -> (Option<Move>, u64) {
     let start = Instant::now();
     let mut s = Searcher {
         stop,
@@ -194,7 +198,7 @@ pub fn search(pos: &Position, limits: &Limits, stop: Arc<AtomicBool>) -> Option<
         if m.is_none() || score > MATE - 256 { break; } // no legal moves, or mate found
     }
     // if even depth 1 was cut off, still return something legal
-    best.or_else(|| legal_moves(pos).as_slice().first().copied())
+    (best.or_else(|| legal_moves(pos).as_slice().first().copied()), s.nodes)
 }
 
 #[cfg(test)]

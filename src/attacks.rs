@@ -80,10 +80,10 @@ pub fn knight_attacks(sq: Square) -> Bitboard { KNIGHT_ATTACKS[sq] }
 pub fn king_attacks(sq: Square) -> Bitboard { KING_ATTACKS[sq] }
 pub fn pawn_attacks(sq: Square, color: Color) -> Bitboard { PAWN_ATTACKS[color][sq] }
 
-const ROOK_DIRS: [(i8, i8); 4] = [(1, 0), (-1, 0), (0, 1), (0, -1)];
-const BISHOP_DIRS: [(i8, i8); 4] = [(1, 1), (1, -1), (-1, 1), (-1, -1)];
+pub const ROOK_DIRS: [(i8, i8); 4] = [(1, 0), (-1, 0), (0, 1), (0, -1)];
+pub const BISHOP_DIRS: [(i8, i8); 4] = [(1, 1), (1, -1), (-1, 1), (-1, -1)];
 
-const fn slide_attacks(sq: usize, occ: u64, dirs: &[(i8, i8); 4]) -> u64 {
+pub const fn slide_attacks(sq: usize, occ: u64, dirs: &[(i8, i8); 4]) -> u64 {
     let mut result = 0u64;
     let mut d = 0;
     while d < 4 {

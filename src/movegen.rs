@@ -1,7 +1,8 @@
 use crate::attacks::*;
 use crate::bitboard::Bitboard;
-use crate::position::*;
 use crate::moves::{Move, MoveList};
+use crate::position::*;
+use crate::sliders::{bishop_attacks, rook_attacks, queen_attacks};
 use crate::types::*;
 
 pub fn generate_moves(pos: &Position, moves: &mut MoveList) {
@@ -13,13 +14,13 @@ pub fn generate_moves(pos: &Position, moves: &mut MoveList) {
         for to in knight_attacks(from) & !own { moves.push(Move::new(from, to)); }
     }
     for from in pos.pieces[me][Piece::Bishop] {
-        for to in bishop_attacks_slow(from, occ) & !own { moves.push(Move::new(from, to)); }
+        for to in bishop_attacks(from, occ) & !own { moves.push(Move::new(from, to)); }
     }
     for from in pos.pieces[me][Piece::Rook] {
-        for to in rook_attacks_slow(from, occ) & !own { moves.push(Move::new(from, to)); }
+        for to in rook_attacks(from, occ) & !own { moves.push(Move::new(from, to)); }
     }
     for from in pos.pieces[me][Piece::Queen] {
-        for to in queen_attacks_slow(from, occ) & !own { moves.push(Move::new(from, to)); }
+        for to in queen_attacks(from, occ) & !own { moves.push(Move::new(from, to)); }
     }
     for from in pos.pieces[me][Piece::King] {
         for to in king_attacks(from) & !own { moves.push(Move::new(from, to)); }
@@ -116,39 +117,45 @@ fn generate_castling(pos: &Position, moves: &mut MoveList) {
     }
 }
 
-fn castles(fen: &str) -> MoveList {
-    let pos = Position::from_fen(fen).unwrap();
-    let mut moves = MoveList::new();
-    generate_castling(&pos, &mut moves);
-    moves
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-#[test]
-fn king_already_on_target() {
-    let fen = "4k3/8/8/8/8/8/8/6KR w K - 0 1";
-    let moves = castles(fen);
-    assert_eq!(moves.len, 1);
-    let after = Position::from_fen(fen).unwrap().make_move(moves.moves[0]);
-    assert_eq!(after.mailbox[Square::new(6, 0)], Some((Color::White, Piece::King)));
-    assert_eq!(after.mailbox[Square::new(5, 0)], Some((Color::White, Piece::Rook)));
-}
+    fn castles(fen: &str) -> MoveList {
+        let pos = Position::from_fen(fen).unwrap();
+        let mut moves = MoveList::new();
+        generate_castling(&pos, &mut moves);
+        moves
+    }
 
-#[test]
-fn rook_destination_must_be_empty() {
-    assert!(castles("4k3/8/8/8/8/8/8/5NKR w K - 0 1").is_empty());
-}
+    #[test]
+    fn king_already_on_target() {
+        let fen = "4k3/8/8/8/8/8/8/6KR w K - 0 1";
+        let moves = castles(fen);
+        assert_eq!(moves.len, 1);
+        let after = Position::from_fen(fen).unwrap().make_move(moves.moves[0]);
+        assert_eq!(after.mailbox[Square::new(6, 0)], Some((Color::White, Piece::King)));
+        assert_eq!(after.mailbox[Square::new(5, 0)], Some((Color::White, Piece::Rook)));
+    }
 
-#[test]
-fn castling_rook_shield_is_removed() {
-    assert!(castles("4k3/8/8/8/8/8/8/rR4K1 w B - 0 1").is_empty());
-}
+    #[test]
+    fn rook_destination_must_be_empty() {
+        assert!(castles("4k3/8/8/8/8/8/8/5NKR w K - 0 1").is_empty());
+    }
 
-#[test]
-fn rook_next_to_king() {
-    assert_eq!(castles("4k3/8/8/8/8/8/8/2KR4 w D - 0 1").len, 1);
-}
+    #[test]
+    fn castling_rook_shield_is_removed() {
+        assert!(castles("4k3/8/8/8/8/8/8/rR4K1 w B - 0 1").is_empty());
+    }
 
-#[test]
-fn standard_both_sides() {
-    assert_eq!(castles("r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1").len, 2);
-}
+    #[test]
+    fn rook_next_to_king() {
+        assert_eq!(castles("4k3/8/8/8/8/8/8/2KR4 w D - 0 1").len, 1);
+    }
+
+    #[test]
+    fn standard_both_sides() {
+        assert_eq!(castles("r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1").len, 2);
+    }
+
+} // mod tests

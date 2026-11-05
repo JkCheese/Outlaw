@@ -2,6 +2,7 @@ use std::fmt;
 use crate::attacks::*;
 use crate::bitboard::Bitboard;
 use crate::moves::Move;
+use crate::sliders::{bishop_attacks, rook_attacks};
 use crate::types::*;
 
 pub const CASTLE_WK: u8 = 0b0001;
@@ -192,8 +193,8 @@ impl Position {
         !(pawn_attacks(sq, by.flip()) & theirs[Piece::Pawn]).is_empty()
             || !(knight_attacks(sq) & theirs[Piece::Knight]).is_empty()
             || !(king_attacks(sq) & theirs[Piece::King]).is_empty()
-            || !(bishop_attacks_slow(sq, occ) & (theirs[Piece::Bishop] | theirs[Piece::Queen])).is_empty()
-            || !(rook_attacks_slow(sq, occ) & (theirs[Piece::Rook] | theirs[Piece::Queen])).is_empty()
+            || !(bishop_attacks(sq, occ) & (theirs[Piece::Bishop] | theirs[Piece::Queen])).is_empty()
+            || !(rook_attacks(sq, occ) & (theirs[Piece::Rook] | theirs[Piece::Queen])).is_empty()
     }
 
     pub fn make_move(&self, m: Move) -> Position {

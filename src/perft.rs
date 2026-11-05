@@ -1,14 +1,7 @@
 use crate::movegen::generate_moves;
-use crate::moves::{Move, MoveList};
+use crate::moves::{MoveList};
 use crate::position::Position;
-use crate::types::Piece;
-
-// the position after `m`, or None if it leaves the mover's own king attacked
-fn legal_next(pos: &Position, m: Move) -> Option<Position> {
-    let next = pos.make_move(m);
-    let king = next.pieces[pos.color_to_move][Piece::King].lsb();
-    if next.is_square_attacked(king, next.color_to_move) { None } else { Some(next) }
-}
+use crate::movegen::legal_next;
 
 pub fn perft(pos: &Position, depth: u32) -> u64 {
     if depth == 0 { return 1; }

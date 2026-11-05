@@ -117,6 +117,23 @@ fn generate_castling(pos: &Position, moves: &mut MoveList) {
     }
 }
 
+// the position after `m`, or None if it leaves the mover's own king attacked
+pub fn legal_next(pos: &Position, m: Move) -> Option<Position> {
+    let next = pos.make_move(m);
+    let king = next.pieces[pos.color_to_move][Piece::King].lsb();
+    if next.is_square_attacked(king, next.color_to_move) { None } else { Some(next) }
+}
+
+pub fn legal_moves(pos: &Position) -> MoveList {
+    let mut all = MoveList::new();
+    generate_moves(pos, &mut all);
+    let mut legal = MoveList::new();
+    for &m in all.as_slice() {
+        if legal_next(pos, m).is_some() { legal.push(m); }
+    }
+    legal
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

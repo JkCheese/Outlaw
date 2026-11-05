@@ -2,10 +2,12 @@
 
 mod attacks;
 mod bitboard;
+mod eval;
 mod movegen;
 mod moves;
 mod perft;
 mod position;
+mod search;
 mod sliders;
 mod types;
 mod uci;

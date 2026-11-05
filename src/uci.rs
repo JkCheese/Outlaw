@@ -1,9 +1,13 @@
 use std::io::{self, BufRead};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::thread::JoinHandle;
 
 use crate::movegen::legal_moves;
 use crate::moves::Move;
 use crate::perft::divide;
 use crate::position::Position;
+use crate::search::{search, Limits};
 use crate::types::Square;
 
 fn sq_name(sq: Square) -> String {
@@ -44,17 +48,6 @@ fn parse_position(args: &[&str], chess960: bool) -> Result<Position, String> {
     Ok(pos)
 }
 
-#[derive(Default)]
-struct Limits {
-    depth: Option<u32>,
-    movetime: Option<u64>,
-    wtime: Option<u64>,
-    btime: Option<u64>,
-    winc: Option<u64>,
-    binc: Option<u64>,
-    infinite: bool,
-}
-
 fn parse_go(args: &[&str]) -> Limits {
     let mut lim = Limits::default();
     for i in 0..args.len() {
@@ -73,14 +66,12 @@ fn parse_go(args: &[&str]) -> Limits {
     lim
 }
 
-// placeholder until real search exists: play the first legal move
-fn search(pos: &Position, _limits: &Limits) -> Option<Move> {
-    legal_moves(pos).as_slice().first().copied()
-}
-
 pub fn run() {
     let mut pos = Position::startpos();
     let mut chess960 = false;
+
+    let mut stop = Arc::new(AtomicBool::new(false));
+    let mut worker: Option<JoinHandle<()>> = None;
 
     for line in io::stdin().lock().lines() {
         let Ok(line) = line else { break };
@@ -108,17 +99,32 @@ pub fn run() {
                 Err(e) => println!("info string {e}"),
             },
             "go" => {
+                if let Some(w) = worker.take() {           // finish any previous search first
+                    stop.store(true, Ordering::Relaxed);
+                    let _ = w.join();
+                }
                 if args.first() == Some(&"perft") {
                     let depth = args.get(1).and_then(|d| d.parse().ok()).unwrap_or(1);
                     divide(&pos, depth);
                 } else {
-                    match search(&pos, &parse_go(&args)) {
-                        Some(m) => println!("bestmove {}", uci_string(m, chess960)),
-                        None => println!("bestmove 0000"), // no legal moves
-                    }
+                    stop = Arc::new(AtomicBool::new(false));
+                    let limits = parse_go(&args);
+                    let p = pos; // Position is Copy
+                    let flag = Arc::clone(&stop);
+                    worker = Some(std::thread::spawn(move || {
+                        match search(&p, &limits, flag) {
+                            Some(m) => println!("bestmove {}", uci_string(m, chess960)),
+                            None => println!("bestmove 0000"),
+                        }
+                    }));
                 }
             }
-            "quit" => break,
+            "stop" => stop.store(true, Ordering::Relaxed),
+            "quit" => {
+                stop.store(true, Ordering::Relaxed);
+                if let Some(w) = worker.take() { let _ = w.join(); }
+                break;
+            }
             _ => {} // unknown commands are ignored
         }
     }

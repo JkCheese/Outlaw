@@ -44,6 +44,13 @@ fn time_limits(limits: &Limits, us: Color) -> (Option<Duration>, Option<Duration
     (Some(Duration::from_millis(soft)), Some(Duration::from_millis(hard)))
 }
 
+// Does `c` have anything besides pawns and the king? Without such pieces a "pass" can be the
+// worst move (zugzwang), so null-move pruning must not be used.
+fn has_non_pawn_material(pos: &Position, c: Color) -> bool {
+    let p = &pos.pieces[c];
+    !(p[Piece::Knight] | p[Piece::Bishop] | p[Piece::Rook] | p[Piece::Queen]).is_empty()
+}
+
 fn in_check(pos: &Position) -> bool {
     let king = pos.pieces[pos.color_to_move][Piece::King].lsb();
     pos.is_square_attacked(king, pos.color_to_move.flip())
@@ -185,7 +192,7 @@ impl<'a> Searcher<'a> {
         alpha
     }
 
-    fn negamax(&mut self, pos: &Position, mut depth: i32, ply: i32, mut alpha: i32, beta: i32) -> i32 {
+    fn negamax(&mut self, pos: &Position, mut depth: i32, ply: i32, mut alpha: i32, beta: i32, can_null: bool) -> i32 {
         let p = ply as usize;
         if p >= MAX_PLY { return evaluate(pos); }
         self.pv_len[p] = 0; // no line known from this node yet (must happen before any early return)
@@ -217,6 +224,24 @@ impl<'a> Searcher<'a> {
             }
         }
 
+        // 2. null-move pruning: if even after PASSING (giving the opponent a free move) the position
+        // still looks good enough to cause a cutoff, a real move would too, so skip the search.
+        // Only in non-PV nodes (zero-width window), never in check, never twice in a row, and never
+        // without pieces (zugzwang: passing can be the best move there).
+        if can_null && !checked && depth >= 3 && beta - alpha == 1
+            && has_non_pawn_material(pos, pos.color_to_move)
+            && evaluate(pos) >= beta
+        {
+            let reduction = 3 + depth / 3;
+            let next = pos.make_null_move();
+            self.path.push(pos.hash);
+            let score = -self.negamax(&next, depth - 1 - reduction, ply + 1, -beta, -beta + 1, false);
+            self.path.pop();
+            if self.stopped { return 0; }
+            // a "mate" found after passing can't be trusted: just search normally
+            if score >= beta && score < MATE - 256 { return beta; }
+        }
+
         let mut moves = MoveList::new();
         generate_moves(pos, &mut moves);
         let mut scores = [0i32; 256];
@@ -230,8 +255,20 @@ impl<'a> Searcher<'a> {
             let Some(next) = legal_next(pos, m) else { continue };
             legal += 1;
 
+            // Principal variation search: the first move is searched with the full window. Every
+            // later move is expected to be worse, so prove that with a zero-width window (much
+            // cheaper), and only search it properly if it unexpectedly beats alpha.
             self.path.push(pos.hash);
-            let score = -self.negamax(&next, depth - 1, ply + 1, -beta, -alpha);
+            let score = if legal == 1 {
+                -self.negamax(&next, depth - 1, ply + 1, -beta, -alpha, true)
+            } else {
+                let s = -self.negamax(&next, depth - 1, ply + 1, -alpha - 1, -alpha, true);
+                if s > alpha && s < beta && !self.stopped {
+                    -self.negamax(&next, depth - 1, ply + 1, -beta, -alpha, true)
+                } else {
+                    s
+                }
+            };
             self.path.pop();
 
             if self.stopped { return 0; } // unfinished: never store half-searched results
@@ -269,8 +306,18 @@ impl<'a> Searcher<'a> {
             let m = moves.moves[i];
             let Some(next) = legal_next(pos, m) else { continue };
 
+            // same principal-variation search as in negamax: first move full window, rest zero-width
             self.path.push(pos.hash);
-            let score = -self.negamax(&next, depth - 1, 1, -INF, -alpha);
+            let score = if best.is_none() {
+                -self.negamax(&next, depth - 1, 1, -INF, -alpha, true)
+            } else {
+                let s = -self.negamax(&next, depth - 1, 1, -alpha - 1, -alpha, true);
+                if s > alpha && !self.stopped {
+                    -self.negamax(&next, depth - 1, 1, -INF, -alpha, true)
+                } else {
+                    s
+                }
+            };
             self.path.pop();
 
             if self.stopped { break; }
@@ -332,8 +379,9 @@ pub fn search_nodes(
             );
         }
         if m.is_none() || score > MATE - 256 { break; } // no legal moves, or mate found
-        // the next depth usually costs 2-3x this one: don't start it if it can't finish in time
-        if soft.map_or(false, |soft| elapsed * 2 >= soft) { break; }
+        // Stop once the soft budget is used up. (An unfinished next depth is still useful, see above,
+        // and the hard limit cuts it off, so there is no need to guess whether it will finish.)
+        if soft.map_or(false, |soft| elapsed >= soft) { break; }
     }
     // if even the first root move was cut off, still return something legal
     let best = best.or_else(|| legal_moves(pos).as_slice().first().copied());
@@ -484,5 +532,28 @@ mod tests {
         let l = Limits { wtime: Some(40), ..Default::default() };
         let (soft, hard) = time_limits(&l, Color::White);
         assert!(soft.unwrap() <= hard.unwrap() && hard.unwrap().as_millis() <= 40);
+    }
+
+    #[test]
+    fn finds_classic_mates_with_pvs_and_null_move() {
+        // (fen, expected best move, depth)
+        for (fen, mv, depth) in [
+            ("r1bqkb1r/pppp1ppp/2n2n2/4p2Q/2B1P3/8/PPPP1PPP/RNB1K1NR w KQkq - 4 4", "h5f7", 3), // Scholar's mate
+            ("rnbqkbnr/pppp1ppp/8/4p3/6P1/5P2/PPPPP2P/RNBQKBNR b KQkq - 0 2", "d8h4", 3),      // Fool's mate
+            ("6rk/6pp/8/6N1/8/8/8/6K1 w - - 0 1", "g5f7", 4),                                  // smothered mate
+        ] {
+            assert_eq!(best(fen, depth), mv, "{fen}");
+        }
+    }
+
+    #[test]
+    fn non_pawn_material_guard() {
+        // null-move pruning is switched off for a side with only king and pawns (zugzwang risk)
+        let pos = Position::from_fen("8/8/3k4/8/3K4/3P4/8/8 w - - 0 1").unwrap();
+        assert!(!has_non_pawn_material(&pos, Color::White));
+        assert!(!has_non_pawn_material(&pos, Color::Black));
+        let pos2 = Position::from_fen("4k3/8/8/8/8/8/8/3QK3 w - - 0 1").unwrap();
+        assert!(has_non_pawn_material(&pos2, Color::White));
+        assert!(!has_non_pawn_material(&pos2, Color::Black));
     }
 } // mod tests

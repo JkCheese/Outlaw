@@ -215,6 +215,21 @@ impl Position {
         h
     }
 
+    /// The position after the side to move "passes". Used by null-move pruning, never in a real game.
+    /// The en passant right disappears (and leaves the hash), and the clock restarts so that
+    /// repetition look-back can't reach across the pass.
+    pub fn make_null_move(&self) -> Position {
+        let mut pos = *self;
+        if let Some(ep) = self.ep_sq {
+            pos.hash ^= ep_key(ep);
+            pos.ep_sq = None;
+        }
+        pos.color_to_move = self.color_to_move.flip();
+        pos.hash ^= KEYS.side;
+        pos.half_move_clock = 0;
+        pos
+    }
+
     /// True when neither side can ever deliver mate: bare kings, or kings plus ONE minor piece.
     /// (Cheap early-out: with more than 3 pieces on the board this is never true.)
     pub fn insufficient_material(&self) -> bool {
@@ -489,6 +504,23 @@ mod tests {
         ];
         for fen in yes { assert!(Position::from_fen(fen).unwrap().insufficient_material(), "{fen}"); }
         for fen in no { assert!(!Position::from_fen(fen).unwrap().insufficient_material(), "{fen}"); }
+    }
+
+    #[test]
+    fn null_move_flips_side_and_keeps_hash_consistent() {
+        for fen in [
+            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+            "4k3/8/8/3pP3/8/8/8/4K3 w - d6 0 1", // en passant right must vanish
+            "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R b KQkq - 3 7",
+        ] {
+            let pos = Position::from_fen(fen).unwrap();
+            let n = pos.make_null_move();
+            assert_eq!(n.color_to_move, pos.color_to_move.flip());
+            assert_eq!(n.ep_sq, None);
+            assert_eq!(n.hash, n.compute_hash(), "{fen}");
+            assert_ne!(n.hash, pos.hash);
+            assert_eq!(n.make_null_move().hash, Position { ep_sq: None, ..pos }.compute_hash()); // pass twice = same board
+        }
     }
 
     #[test]

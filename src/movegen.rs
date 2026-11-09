@@ -30,6 +30,51 @@ pub fn generate_moves(pos: &Position, moves: &mut MoveList) {
     generate_castling(pos, moves);
 }
 
+/// Only the "noisy" moves quiescence search cares about: captures (en passant included) and
+/// promotions (quiet pushes to the last rank too). Same pseudo-legal rules as `generate_moves`,
+/// so callers still filter with `legal_next`. Skipping quiet moves entirely is what makes
+/// quiescence nodes cheap: most positions have ~30 quiet moves and only a handful of captures.
+pub fn generate_captures(pos: &Position, moves: &mut MoveList) {
+    let me = pos.color_to_move;
+    let enemy = pos.occupied_by[me.flip()];
+    let occ = pos.occupied;
+
+    for from in pos.pieces[me][Piece::Knight] {
+        for to in knight_attacks(from) & enemy { moves.push(Move::new(from, to)); }
+    }
+    for from in pos.pieces[me][Piece::Bishop] {
+        for to in bishop_attacks(from, occ) & enemy { moves.push(Move::new(from, to)); }
+    }
+    for from in pos.pieces[me][Piece::Rook] {
+        for to in rook_attacks(from, occ) & enemy { moves.push(Move::new(from, to)); }
+    }
+    for from in pos.pieces[me][Piece::Queen] {
+        for to in queen_attacks(from, occ) & enemy { moves.push(Move::new(from, to)); }
+    }
+    for from in pos.pieces[me][Piece::King] {
+        for to in king_attacks(from) & enemy { moves.push(Move::new(from, to)); }
+    }
+
+    let (dir, promo_rank): (i8, u8) = if me == Color::White { (8, 7) } else { (-8, 0) };
+    for from in pos.pieces[me][Piece::Pawn] {
+        let attacks = pawn_attacks(from, me);
+
+        // a push is "noisy" only if it promotes
+        let one = Square((from.0 as i8 + dir) as u8);
+        if one.rank() == promo_rank && !occ.contains(one) {
+            push_pawn_move(moves, from, one, promo_rank);
+        }
+        for to in attacks & enemy {
+            push_pawn_move(moves, from, to, promo_rank);
+        }
+        if let Some(ep) = pos.ep_sq {
+            if attacks.contains(ep) {
+                moves.push(Move::special(from, ep, Move::EN_PASSANT));
+            }
+        }
+    }
+}
+
 fn push_pawn_move(moves: &mut MoveList, from: Square, to: Square, promo_rank: u8) {
     if to.rank() == promo_rank {
         for piece in [Piece::Queen, Piece::Rook, Piece::Bishop, Piece::Knight] {
@@ -143,6 +188,49 @@ mod tests {
         let mut moves = MoveList::new();
         generate_castling(&pos, &mut moves);
         moves
+    }
+
+    /// The capture generator must produce EXACTLY the moves of `generate_moves` that capture
+    /// or promote, in every position of a whole move tree (not just a few hand-picked ones).
+    fn check_captures(pos: &Position, depth: u32, seen: &mut (u64, u64, u64)) {
+        let mut all = MoveList::new();
+        generate_moves(pos, &mut all);
+        let mut expected: Vec<u16> = all.as_slice().iter()
+            .filter(|&&m| pos.is_capture(m) || m.promotion_piece().is_some())
+            .map(|m| m.raw()).collect();
+        let mut caps = MoveList::new();
+        generate_captures(pos, &mut caps);
+        let mut got: Vec<u16> = caps.as_slice().iter().map(|m| m.raw()).collect();
+        expected.sort();
+        got.sort();
+        assert_eq!(got, expected, "capture list differs in\n{pos}");
+        seen.0 += 1;
+        seen.1 += caps.as_slice().iter().filter(|m| m.kind() == Move::EN_PASSANT).count() as u64;
+        seen.2 += caps.as_slice().iter().filter(|m| m.promotion_piece().is_some()).count() as u64;
+        if depth == 0 { return; }
+        for &m in all.as_slice() {
+            if let Some(next) = legal_next(pos, m) { check_captures(&next, depth - 1, seen); }
+        }
+    }
+
+    #[test]
+    fn capture_generator_matches_filtered_full_generator() {
+        let mut seen = (0, 0, 0);
+        for (fen, depth) in [
+            ("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1", 4),
+            ("r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1", 3),
+            ("8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 1", 4),                       // en passant
+            ("r3k2r/Pppp1ppp/1b3nbN/nP6/BBP1P3/q4N2/Pp1P2PP/R2Q1RK1 w kq - 0 1", 3), // promotions
+            ("rnbq1k1r/pp1Pbppp/2p5/8/2B5/8/PPP1NnPP/RNBQK2R w KQ - 1 8", 3),
+            ("4k3/P7/8/8/8/8/p7/4K3 w - - 0 1", 3),                                 // quiet promotions, both colours
+            ("4k3/8/8/3pP3/8/8/8/4K3 w - d6 0 1", 2),
+        ] {
+            check_captures(&Position::from_fen(fen).unwrap(), depth, &mut seen);
+        }
+        // make sure the interesting cases were really exercised, not just the easy ones
+        assert!(seen.1 > 0, "no en passant captures were seen");
+        assert!(seen.2 > 0, "no promotions were seen");
+        println!("checked {} positions ({} ep, {} promotion moves)", seen.0, seen.1, seen.2);
     }
 
     #[test]

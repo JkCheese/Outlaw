@@ -40,6 +40,12 @@ impl Tt {
         self.entries.fill(EMPTY);
     }
 
+    /// Permille of slots in use, sampled from the first 1000 slots (what UCI `hashfull` reports).
+    pub fn hashfull(&self) -> usize {
+        let n = self.entries.len().min(1000);
+        self.entries[..n].iter().filter(|e| e.key != 0).count() * 1000 / n
+    }
+
     /// The entry in this position's slot, but only if it really is for this position.
     #[inline]
     pub fn probe(&self, key: u64) -> Option<Entry> {
@@ -91,6 +97,18 @@ mod tests {
         t.store(b, Move::NULL, 20, 3, Bound::Exact);
         assert!(t.probe(a).is_none()); // a's note was overwritten: only costs a re-search
         assert_eq!(t.probe(b).unwrap().score, 20);
+    }
+
+    #[test]
+    fn hashfull_counts_used_slots() {
+        let mut t = Tt::new(1);
+        assert_eq!(t.hashfull(), 0);
+        for key in 1..=1000u64 {
+            t.store(key, Move::NULL, 0, 1, Bound::Exact);
+        }
+        assert!(t.hashfull() >= 990, "{}", t.hashfull()); // slots 1..=999 of the sampled 0..999
+        t.clear();
+        assert_eq!(t.hashfull(), 0);
     }
 
     #[test]

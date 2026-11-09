@@ -9,28 +9,12 @@ use crate::perft::divide;
 use crate::position::Position;
 use crate::search::{search, Limits};
 use crate::tt::Tt;
-use crate::types::Square;
 
 const DEFAULT_HASH_MB: usize = 16;
 
-fn sq_name(sq: Square) -> String {
-    format!("{}{}", (b'a' + sq.file()) as char, sq.rank() + 1)
-}
-
-// how a move is written on the wire; castling differs between standard and 960
-fn uci_string(m: Move, chess960: bool) -> String {
-    if m.kind() == Move::CASTLING && !chess960 {
-        let from = m.from_sq();
-        let file = if m.to_sq().file() > from.file() { 6 } else { 2 };
-        format!("{}{}", sq_name(from), sq_name(Square::new(file, from.rank())))
-    } else {
-        m.to_string()
-    }
-}
-
 // find the legal move whose text matches what the GUI sent
 fn parse_move(pos: &Position, text: &str, chess960: bool) -> Option<Move> {
-    legal_moves(pos).as_slice().iter().copied().find(|&m| uci_string(m, chess960) == text)
+    legal_moves(pos).as_slice().iter().copied().find(|&m| m.to_uci(chess960) == text)
 }
 
 // returns the final position and the hash of every position before it (for repetition detection)
@@ -65,6 +49,7 @@ fn parse_go(args: &[&str]) -> Limits {
             "btime" => lim.btime = value,
             "winc" => lim.winc = value,
             "binc" => lim.binc = value,
+            "nodes" => lim.nodes = value,
             "infinite" => lim.infinite = true,
             _ => {}
         }
@@ -100,7 +85,7 @@ pub fn run() {
 
         match cmd {
             "uci" => {
-                println!("id name outlaw");
+                println!("id name outlaw {}", env!("CARGO_PKG_VERSION"));
                 println!("id author <your name>");
                 println!("option name Hash type spin default {DEFAULT_HASH_MB} min 1 max 4096");
                 println!("option name UCI_Chess960 type check default false");
@@ -142,14 +127,15 @@ pub fn run() {
                     divide(&pos, depth);
                 } else {
                     stop = Arc::new(AtomicBool::new(false));
-                    let limits = parse_go(&args);
+                    let mut limits = parse_go(&args);
+                    limits.chess960 = chess960; // so `info ... pv` prints castling the way the GUI expects
                     let p = pos; // Position is Copy
                     let h = history.clone();
                     let flag = Arc::clone(&stop);
                     let mut table = tt.take().expect("table is not with the search thread");
                     worker = Some(std::thread::spawn(move || {
                         match search(&p, &limits, flag, h, &mut table) {
-                            Some(m) => println!("bestmove {}", uci_string(m, chess960)),
+                            Some(m) => println!("bestmove {}", m.to_uci(chess960)),
                             None => println!("bestmove 0000"),
                         }
                         table

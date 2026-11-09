@@ -49,6 +49,22 @@ impl Move {
             _ => Piece::Queen,
         })
     }
+
+    /// The text a GUI expects. Castling is stored internally as "king takes its own rook"
+    /// (needed for Chess960), but standard UCI wants the king's real destination (e1g1).
+    pub fn to_uci(self, chess960: bool) -> String {
+        if self.kind() == Move::CASTLING && !chess960 {
+            let from = self.from_sq();
+            let file = if self.to_sq().file() > from.file() { 6 } else { 2 };
+            let to = Square::new(file, from.rank());
+            return format!(
+                "{}{}{}{}",
+                (b'a' + from.file()) as char, from.rank() + 1,
+                (b'a' + to.file()) as char, to.rank() + 1,
+            );
+        }
+        self.to_string()
+    }
 } // impl Move
 
 impl fmt::Display for Move {
@@ -108,6 +124,17 @@ mod tests {
         }
         let q = Move::promotion(Square::new(0, 6), Square::new(0, 7), Piece::Queen);
         assert_eq!(q.to_string(), "a7a8q");
+    }
+
+    #[test]
+    fn castling_uci_text() {
+        let c = Move::special(Square::new(4, 0), Square::new(7, 0), Move::CASTLING); // king e1 takes rook h1
+        assert_eq!(c.to_uci(false), "e1g1");
+        assert_eq!(c.to_uci(true), "e1h1");
+        let q = Move::special(Square::new(4, 7), Square::new(0, 7), Move::CASTLING);
+        assert_eq!(q.to_uci(false), "e8c8");
+        let n = Move::new(Square::new(4, 1), Square::new(4, 3));
+        assert_eq!(n.to_uci(false), "e2e4");
     }
 
     #[test]

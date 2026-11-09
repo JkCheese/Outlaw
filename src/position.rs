@@ -42,7 +42,7 @@ impl Position {
             full_move_count: 1,
             castling_rights: 0,
             castling_rook_sqs: [Square(0); 4],
-            hash: 0,
+            hash: castling_key(0), // matches compute_hash() for an empty board, White to move
         }
     }
 
@@ -213,6 +213,17 @@ impl Position {
             h ^= ep_key(ep);
         }
         h
+    }
+
+    /// True when neither side can ever deliver mate: bare kings, or kings plus ONE minor piece.
+    /// (Cheap early-out: with more than 3 pieces on the board this is never true.)
+    pub fn insufficient_material(&self) -> bool {
+        if self.occupied.count() > 3 {
+            return false;
+        }
+        [Color::White, Color::Black].iter().all(|&c| {
+            (self.pieces[c][Piece::Pawn] | self.pieces[c][Piece::Rook] | self.pieces[c][Piece::Queen]).is_empty()
+        })
     }
 
     pub fn is_capture(&self, m: Move) -> bool {
@@ -464,6 +475,28 @@ mod tests {
         // "xyz" cannot be parsed into an integer
         let res = Position::from_fen("8/8/8/8/8/8/8/8 w - - 0 xyz");
         assert_eq!(res.unwrap_err(), "bad fullmove number");
+    }
+
+    #[test]
+    fn insufficient_material_cases() {
+        let yes = ["4k3/8/8/8/8/8/8/4K3 w - - 0 1", "4k3/8/8/8/8/8/8/3NK3 w - - 0 1", "4k3/8/8/8/8/8/8/3BK3 b - - 0 1", "3bk3/8/8/8/8/8/8/4K3 w - - 0 1"];
+        let no = [
+            "4k3/8/8/8/8/8/4P3/4K3 w - - 0 1",   // a pawn can promote
+            "4k3/8/8/8/8/8/8/3RK3 w - - 0 1",    // rook
+            "4k3/8/8/8/8/8/8/3QK3 w - - 0 1",    // queen
+            "4k3/8/8/8/8/8/8/2NNK3 w - - 0 1",   // two knights: not an automatic draw
+            "3bk3/8/8/8/8/8/8/3BK3 w - - 0 1",   // two bishops: mate is possible on opposite colours
+        ];
+        for fen in yes { assert!(Position::from_fen(fen).unwrap().insufficient_material(), "{fen}"); }
+        for fen in no { assert!(!Position::from_fen(fen).unwrap().insufficient_material(), "{fen}"); }
+    }
+
+    #[test]
+    fn hand_built_position_has_consistent_hash() {
+        let mut pos = Position::new();
+        pos.place_piece(Color::White, Piece::King, Square::new(4, 0));
+        pos.place_piece(Color::Black, Piece::King, Square::new(4, 7));
+        assert_eq!(pos.hash, pos.compute_hash());
     }
 
     // --- Zobrist hashing ---

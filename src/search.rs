@@ -13,6 +13,11 @@ const INF: i32 = 32_000;
 const MATE: i32 = 30_000;
 const MAX_PLY: usize = 128; // hard cap on search depth (extensions included)
 
+// ---- move ordering and reduction tuning ----
+const KILLER_SCORE: i32 = 9_000;   // below every capture (>= 10_000), above every history score
+const MAX_HISTORY: i32 = 8_192;    // history scores never leave [-MAX_HISTORY, MAX_HISTORY] (must stay < KILLER_SCORE)
+const LMR_MIN_MOVES: usize = 3;    // moves searched before late move reductions start
+
 #[derive(Default)]
 pub struct Limits {
     pub depth: Option<u32>,
@@ -119,6 +124,21 @@ struct Searcher<'a> {
     // on (pv[ply * MAX_PLY ..][..pv_len[ply]]). A parent builds its row from its child's.
     pv: Vec<Move>,
     pv_len: [usize; MAX_PLY + 1],
+    // Quiet-move ordering memory. Killers: the two quiet moves that most recently caused a cutoff
+    // at each ply. History: how often a quiet move (indexed colour/from/to) has caused cutoffs.
+    killers: [[Move; 2]; MAX_PLY + 1],
+    history: Vec<i32>,
+    lmr: [[u8; 64]; 64], // late move reduction by [depth][move number]
+}
+
+fn build_lmr() -> [[u8; 64]; 64] {
+    let mut t = [[0u8; 64]; 64];
+    for d in 1..64 {
+        for m in 1..64 {
+            t[d][m] = (0.75 + (d as f64).ln() * (m as f64).ln() / 2.25) as u8;
+        }
+    }
+    t
 }
 
 impl<'a> Searcher<'a> {
@@ -134,7 +154,51 @@ impl<'a> Searcher<'a> {
             root_move: Move::NULL,
             pv: vec![Move::NULL; (MAX_PLY + 1) * MAX_PLY],
             pv_len: [0; MAX_PLY + 1],
+            killers: [[Move::NULL; 2]; MAX_PLY + 1],
+            history: vec![0; 2 * 4096],
+            lmr: build_lmr(),
         }
+    }
+
+    // ordering for the main search: table move, captures/promotions (MVV-LVA), killers, then history
+    fn score_moves_main(&self, pos: &Position, moves: &MoveList, scores: &mut [i32; 256], tt_move: Move, ply: usize) {
+        let killers = self.killers[ply];
+        let base = pos.color_to_move as usize * 4096;
+        for i in 0..moves.len {
+            let m = moves.moves[i];
+            scores[i] = if m == tt_move {
+                1_000_000
+            } else {
+                let noisy = move_score(pos, m, Move::NULL); // 0 for quiet moves
+                if noisy != 0 {
+                    noisy
+                } else if m == killers[0] || m == killers[1] {
+                    KILLER_SCORE
+                } else {
+                    self.history[base + m.from_to()]
+                }
+            };
+        }
+    }
+
+    // `m` is a quiet move that just caused a cutoff: remember it, and penalise the quiet moves
+    // that were tried before it and failed to cut.
+    fn reward_quiet(&mut self, ply: usize, us: Color, m: Move, depth: i32, tried: &[Move]) {
+        if self.killers[ply][0] != m {
+            self.killers[ply][1] = self.killers[ply][0];
+            self.killers[ply][0] = m;
+        }
+        let bonus = (depth * depth).min(1600);
+        self.bump_history(us, m, bonus);
+        for &q in tried {
+            self.bump_history(us, q, -bonus);
+        }
+    }
+
+    // "gravity" update: the closer a score is to the limit, the less a same-sign bonus adds
+    fn bump_history(&mut self, us: Color, m: Move, bonus: i32) {
+        let h = &mut self.history[us as usize * 4096 + m.from_to()];
+        *h += bonus - *h * bonus.abs() / MAX_HISTORY;
     }
 
     // `m` just raised alpha at `ply`: the line from here is `m` followed by the child's line
@@ -245,15 +309,31 @@ impl<'a> Searcher<'a> {
         let mut moves = MoveList::new();
         generate_moves(pos, &mut moves);
         let mut scores = [0i32; 256];
-        score_moves(pos, &moves, &mut scores, tt_move);
+        self.score_moves_main(pos, &moves, &mut scores, tt_move, p);
 
-        let mut legal = 0;
+        let mut legal: usize = 0;
         let mut best_move = Move::NULL;
+        let mut tried = [Move::NULL; 64]; // quiet moves searched so far (for the history penalty)
+        let mut n_tried = 0;
         for i in 0..moves.len {
             pick_next(&mut moves, &mut scores, i);
             let m = moves.moves[i];
             let Some(next) = legal_next(pos, m) else { continue };
             legal += 1;
+
+            let quiet = !pos.is_capture(m) && m.promotion_piece().is_none();
+
+            // Late move reductions: moves that come late in the ordering are usually bad, so search
+            // them to a reduced depth first. Not for captures/promotions, when in check, or for
+            // moves that give check. Fewer reductions for killers, history favourites and PV nodes.
+            let mut r = 0;
+            if depth >= 3 && legal >= LMR_MIN_MOVES && !checked && quiet && !in_check(&next) {
+                r = self.lmr[depth.min(63) as usize][legal.min(63)] as i32;
+                if beta - alpha > 1 { r -= 1; }
+                if m == self.killers[p][0] || m == self.killers[p][1] { r -= 1; }
+                r -= self.history[pos.color_to_move as usize * 4096 + m.from_to()] / 4096;
+                r = r.clamp(0, depth - 2);
+            }
 
             // Principal variation search: the first move is searched with the full window. Every
             // later move is expected to be worse, so prove that with a zero-width window (much
@@ -262,7 +342,11 @@ impl<'a> Searcher<'a> {
             let score = if legal == 1 {
                 -self.negamax(&next, depth - 1, ply + 1, -beta, -alpha, true)
             } else {
-                let s = -self.negamax(&next, depth - 1, ply + 1, -alpha - 1, -alpha, true);
+                let mut s = -self.negamax(&next, depth - 1 - r, ply + 1, -alpha - 1, -alpha, true);
+                if s > alpha && r > 0 && !self.stopped {
+                    // the reduced search was wrong to doubt this move: redo it at full depth
+                    s = -self.negamax(&next, depth - 1, ply + 1, -alpha - 1, -alpha, true);
+                }
                 if s > alpha && s < beta && !self.stopped {
                     -self.negamax(&next, depth - 1, ply + 1, -beta, -alpha, true)
                 } else {
@@ -273,6 +357,7 @@ impl<'a> Searcher<'a> {
 
             if self.stopped { return 0; } // unfinished: never store half-searched results
             if score >= beta {
+                if quiet { self.reward_quiet(p, pos.color_to_move, m, depth, &tried[..n_tried]); }
                 self.tt.store(pos.hash, m, to_tt(beta, ply), depth, Bound::Lower);
                 return beta;
             }
@@ -280,6 +365,10 @@ impl<'a> Searcher<'a> {
                 alpha = score;
                 best_move = m;
                 self.update_pv(p, m);
+            }
+            if quiet && n_tried < tried.len() {
+                tried[n_tried] = m;
+                n_tried += 1;
             }
         }
         if legal == 0 {
@@ -297,7 +386,7 @@ impl<'a> Searcher<'a> {
         let mut moves = MoveList::new();
         generate_moves(pos, &mut moves);
         let mut scores = [0i32; 256];
-        score_moves(pos, &moves, &mut scores, self.root_move);
+        self.score_moves_main(pos, &moves, &mut scores, self.root_move, 0);
 
         let mut alpha = -INF;
         let mut best = None;
@@ -556,4 +645,70 @@ mod tests {
         assert!(has_non_pawn_material(&pos2, Color::White));
         assert!(!has_non_pawn_material(&pos2, Color::Black));
     }
-} // mod tests
+
+    #[test]
+    fn lmr_table_is_sane() {
+        let t = build_lmr();
+        assert_eq!(t[1][1], 0); // never reduce at depth 1
+        assert!(t[20][20] >= 2 && t[20][20] <= 6, "{}", t[20][20]);
+        for d in 3..63 {
+            for m in 3..63 {
+                assert!(t[d + 1][m] >= t[d][m] && t[d][m + 1] >= t[d][m]); // deeper / later => reduce more
+            }
+        }
+    }
+
+    #[test]
+    fn history_stays_bounded_and_moves_the_right_way() {
+        let mut tt = Tt::new(1);
+        let mut s = searcher(&mut tt, Vec::new());
+        let m = Move::new(crate::types::Square::new(4, 1), crate::types::Square::new(4, 3));
+        for _ in 0..1000 { s.bump_history(Color::White, m, 1600); }
+        let h = s.history[m.from_to()];
+        assert!(h > 0 && h <= MAX_HISTORY, "{h}");
+        for _ in 0..3000 { s.bump_history(Color::White, m, -1600); }
+        assert!(s.history[m.from_to()] < 0 && s.history[m.from_to()] >= -MAX_HISTORY);
+        assert!(MAX_HISTORY < KILLER_SCORE); // history must never outrank a killer move
+        // the other colour's table is separate
+        assert_eq!(s.history[4096 + m.from_to()], 0);
+    }
+
+    #[test]
+    fn ordering_is_tt_move_then_captures_then_killers_then_history() {
+        use crate::types::Square;
+        // white queen d1 can take the pawn on d5; plenty of quiet moves too
+        let pos = Position::from_fen("4k3/8/8/3p4/8/8/8/3QK3 w - - 0 1").unwrap();
+        let mut tt = Tt::new(1);
+        let mut s = searcher(&mut tt, Vec::new());
+        let capture = Move::new(Square::new(3, 0), Square::new(3, 4)); // Qxd5
+        let killer = Move::new(Square::new(3, 0), Square::new(3, 1));  // Qd2
+        let liked = Move::new(Square::new(3, 0), Square::new(2, 0));   // Qc1
+        let tt_move = Move::new(Square::new(4, 0), Square::new(4, 1)); // Ke2
+        s.killers[3][0] = killer;
+        s.history[liked.from_to()] = 500;
+        let mut moves = MoveList::new();
+        generate_moves(&pos, &mut moves);
+        let mut scores = [0i32; 256];
+        s.score_moves_main(&pos, &moves, &mut scores, tt_move, 3);
+        let score_of = |m: Move| (0..moves.len).find(|&i| moves.moves[i] == m).map(|i| scores[i]).unwrap();
+        assert!(score_of(tt_move) > score_of(capture));
+        assert!(score_of(capture) > score_of(killer));
+        assert!(score_of(killer) > score_of(liked));
+        assert!(score_of(liked) > 0);
+    }
+
+    #[test]
+    fn quiet_cutoff_records_killer_and_penalises_earlier_quiets() {
+        use crate::types::Square;
+        let mut tt = Tt::new(1);
+        let mut s = searcher(&mut tt, Vec::new());
+        let a = Move::new(Square::new(0, 1), Square::new(0, 2));
+        let b = Move::new(Square::new(1, 1), Square::new(1, 2));
+        let c = Move::new(Square::new(2, 1), Square::new(2, 2));
+        s.reward_quiet(5, Color::White, a, 6, &[]);
+        s.reward_quiet(5, Color::White, b, 6, &[c]);
+        assert_eq!(s.killers[5], [b, a]); // newest first, previous killer shifts down
+        assert!(s.history[b.from_to()] > 0);
+        assert!(s.history[c.from_to()] < 0); // tried before the cutoff and failed to cut
+    }
+}
